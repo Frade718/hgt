@@ -51,7 +51,7 @@ VPNGATE_MIRROR = os.environ.get(
     "https://raw.githubusercontent.com/fdciabdul/Vpngate-Scraper-API/main/json/data.json",
 )
 # 已部署的 Cloudflare Worker 检测接口 (GET /check?proxyip=host:port, 实测确认)
-WORKER_CHECK_URL = os.environ.get("CHECK_WORKER", "https://check.helei.kdns.fr/check?sstp=vpn:vpn@")
+WORKER_CHECK_URL = os.environ.get("CHECK_WORKER", "https://ch.frade.kdns.fr/check?sstp=vpn:vpn@")
 CONCURRENCY = max(1, int(os.environ.get("CHECK_CONCURRENCY", "32")))   # 与 Worker 网页端一致的并发模型
 CHECK_TIMEOUT = float(os.environ.get("CHECK_TIMEOUT", "90"))          # 单请求客户端超时 (秒)
 MAX_CHECK_NODES = int(os.environ.get("MAX_CHECK_NODES", "0"))         # 0=不限; 本地测试可设小值
@@ -460,8 +460,13 @@ EDGE_HOSTS = [
     h.strip()
     for h in os.environ.get(
         "EDGE_HOSTS",
-        "saas.072159.xyz:443,hzytjy.cn:443,ali.nonull.pp.ua:443,auto.dolby.dpdns.org:443,"
-        "cdn.cnno.de:443,saas.sin.fan:443,cf.777791.xyz:443",
+        "saas.072159.xyz:2083,resources.biginterview.com:2083,s.ee:2083,kernelsu.com:2083,"
+        "img.imgdd.com:2083,cf.itv888.cn:2083,mrmacintosh.com:2083,www.timbuktutravel.com:2083,"
+        "app.rebase.tv:2083,cloudflare.idc.rocks:2083,de.102198.xyz:2083,moegirl.icu:2083,"
+        "cdn.tzpro.xyz:2083,help.kolet.com:2083,tracker.metricool.com:2083,zen-browser.app:2083,"
+        "bestcf.030101.xyz:2083,liziye.pages.dev:2083,img.dexbug.com:2083,journeys.com:2083,"
+        "store.rg-adguard.net:2083,sellerlogic.com:2083,p.etime.vip:2083,aandd.co.jp:2083,cn.vuejs.org:2083,"
+        "db-ip.com:2083,macked.app:2083,16k.club:2083,emos.best:2083",
     ).split(",")
     if h.strip()
 ]
@@ -522,8 +527,8 @@ def build_hosts_text(data):
 
 
 # edgetunnel 完整订阅 (vless://) 配置
-EDT_UUID = os.environ.get("EDT_UUID", "90c14586-42a5-4c30-959d-8b36608d67f7")
-EDT_DOMAIN = os.environ.get("EDT_DOMAIN", "ed.xiaolei.qzz.io")
+EDT_UUID = os.environ.get("EDT_UUID", "842a8f61-50d2-4885-9ee6-b9ec042cc667")
+EDT_DOMAIN = os.environ.get("EDT_DOMAIN", "cyj.research.kdns.fr")
 EDT_FINGERPRINT = os.environ.get("EDT_FINGERPRINT", "chrome")
 SUB_URL = os.environ.get("SUB_URL", "https://jerylihub.github.io/gate/sub.txt")
 
