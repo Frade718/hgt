@@ -1,9 +1,8 @@
 name: VPN Gate Node Check
 
-on:
-  # 定时检测: 默认每 30 分钟一次。改成每 60 分钟: cron: "0 * * * *"
+'on':
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: '*/30 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -19,6 +18,21 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CHECK_WORKER: 'https://ch.frade.kdns.fr/check?sstp=vpn:vpn@'
+      EXPECTED_WORKER_REVISION: '2026-10-03-conservative-2'
+      CHECK_CONCURRENCY: '32'
+      CHECK_TIMEOUT: '90'
+      # Fresh build output, separate from both repository files and diagnostics.
+      PUBLIC_DIR: ${{ github.workspace }}/hgt-public
+      DIAGNOSTICS_DIR: ${{ github.workspace }}/hgt-diagnostics
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,49 +40,155 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
+
+      # Prerequisite: Settings > Pages > Build and deployment > Source = GitHub Actions.
+      # Read existing site metadata; do not try to enable Pages with GITHUB_TOKEN.
+      - name: Read existing Pages configuration
+        id: pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: 'false'
+
+      - name: Set list URLs from this Pages site
+        id: site_urls
+        env:
+          PAGES_BASE_URL: ${{ steps.pages.outputs.base_url }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from urllib.parse import urlsplit
+          base = os.environ['PAGES_BASE_URL'].rstrip('/')
+          parsed = urlsplit(base)
+          if (parsed.scheme != 'https' or not parsed.netloc or parsed.username or parsed.password
+                  or parsed.query or parsed.fragment or any(c.isspace() for c in base)):
+              raise SystemExit('Invalid Pages base_url; confirm Settings > Pages > GitHub Actions.')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              for key, filename in [('CHAIN_URL', 'chains.txt'), ('HOSTS_URL', 'hosts.txt'), ('SUB_URL', 'sub.txt')]:
+                  output.write(f'{key}={base}/{filename}\n')
+          PY
+
+      - name: Check Worker revision and JSON failure contract (no proxy connection)
+        id: preflight
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from urllib.parse import urlsplit, urlunsplit
+          from urllib.request import Request, urlopen
+          folder = Path(os.environ['DIAGNOSTICS_DIR'])
+          folder.mkdir(parents=True, exist_ok=True)
+          report = {'contract_ok': False}
+          expected = os.environ['EXPECTED_WORKER_REVISION']
+          try:
+              endpoint = urlsplit(os.environ['CHECK_WORKER'])
+              # Empty SSTP input exercises parsing only. Never send a node or log the credential-bearing prefix.
+              url = urlunsplit((endpoint.scheme, endpoint.netloc, '/check', 'sstp=', ''))
+              with urlopen(Request(url, headers={'User-Agent': 'hgt-workflow-preflight'}), timeout=20) as response:
+                  status = response.status
+                  media_type = response.headers.get_content_type()
+                  report['http_status'] = status
+                  raw = response.read(65537)
+                  if len(raw) > 65536:
+                      raise ValueError('Response size')
+                  payload = json.loads(raw)
+              if not isinstance(payload, dict):
+                  raise ValueError('Response shape')
+              diag = payload.get('diagnostics')
+              if not isinstance(diag, dict):
+                  raise ValueError('Missing diagnostic contract')
+              # Persist only fixed/validated fields, never raw JSON, errors, candidate, link, username or password.
+              wanted = {'revision': expected, 'stage': 'parse_proxy', 'code': 'INVALID_PROXY'}
+              report.update({key: value if diag.get(key) == value else 'unexpected' for key, value in wanted.items()})
+              latency = payload.get('responseTime')
+              report['contract_ok'] = (status == 200 and media_type == 'application/json'
+                  and payload.get('success') is False and type(latency) in (int, float) and latency >= 0
+                  and all(diag.get(key) == value for key, value in wanted.items()))
+          except Exception as error:
+              report['exception_type'] = type(error).__name__
+              if isinstance(getattr(error, 'code', None), int):
+                  report['http_status'] = error.code
+          text = json.dumps(report, indent=2)
+          (folder / 'worker-preflight.json').write_text(text, encoding='utf-8')
+          print(text)
+          if not report['contract_ok']:
+              raise SystemExit('Worker preflight failed; see sanitized diagnostics. No node batch was started.')
+          PY
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
 
-      - name: Get VPN Gate nodes + check via Cloudflare Worker + build page
-        run: python vpngate.py
-        env:
-          # 已部署的检测 Worker (不要改动: 检测统一走这里)
-          CHECK_WORKER: "https://check.helei.kdns.fr/check?sstp=vpn:vpn@"
-          CHECK_CONCURRENCY: "32"
-          CHECK_TIMEOUT: "90"
+      - name: Get VPN Gate nodes, check once, and build the site
+        id: build
+        timeout-minutes: 20
+        run: python -u vpngate.py
 
-      - name: Ensure GitHub Pages is enabled (one-time auto setup)
+      - name: Validate generated Pages files
+        id: validate
         run: |
-          code=$(curl -s -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/pages")
-          echo "Pages API status: $code"
-          if [ "$code" = "404" ]; then
-            echo "首次运行: 启用 GitHub Pages (source = GitHub Actions, 目录 /public)"
-            curl -sS -X PUT \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d '{"build_type":"workflow","source":{"branches":["main"],"path":"/public"}}' \
-              "https://api.github.com/repos/$GITHUB_REPOSITORY/pages"
-            echo
-            sleep 10
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Configure Pages
-        uses: actions/configure-pages@v5
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          root = Path(os.environ['PUBLIC_DIR'])
+          required = ['index.html', 'data.json', 'chains.txt', 'hosts.txt', 'sub.txt']
+          for name in required:
+              item = root / name
+              if not item.is_file() or item.is_symlink() or item.stat().st_size == 0:
+                  raise SystemExit(f'Missing, empty or linked output: {name}')
+          data = json.loads((root / 'data.json').read_text(encoding='utf-8'))
+          if not isinstance(data, dict) or data.get('worker') != os.environ['CHECK_WORKER']:
+              raise SystemExit('Invalid output schema or unexpected Worker endpoint.')
+          stats, available = data.get('stats'), data.get('available')
+          if not isinstance(stats, dict) or not isinstance(available, list):
+              raise SystemExit('Invalid generated data containers.')
+          counts = {key: stats.get(key) for key in ['checked', 'success', 'failed']}
+          if not all(type(value) is int and value >= 0 for value in counts.values()):
+              raise SystemExit('Invalid output counts.')
+          if (counts['checked'] < 1 or counts['checked'] != counts['success'] + counts['failed']
+                  or len(available) != counts['success']):
+              raise SystemExit('Inconsistent output counts.')
+          for key, filename in [('CHAIN_URL', 'chains.txt'), ('HOSTS_URL', 'hosts.txt'), ('SUB_URL', 'sub.txt')]:
+              if f"# 固定地址: {os.environ[key]}" not in (root / filename).read_text(encoding='utf-8').splitlines():
+                  raise SystemExit(f'Wrong site URL in {filename}')
+          folder = Path(os.environ['DIAGNOSTICS_DIR'])
+          folder.mkdir(parents=True, exist_ok=True)
+          (folder / 'build-summary.json').write_text(json.dumps(counts, indent=2), encoding='utf-8')
+          print(json.dumps(counts, indent=2))
+          if counts['success'] == 0:
+              print('::warning::No nodes passed. A valid site build does not establish SSTP connectivity.')
+          print('::warning::Current Python ignores verification and uses ASN/host heuristics; output is compatibility data, not identity-verified metadata.')
+          PY
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v4
         with:
-          path: 'public'
+          path: ${{ env.PUBLIC_DIR }}
 
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
 
-      - name: Show site URL
-        run: 'echo "site: https://jerylihub.github.io/gate/ (deploy outcome: ${{ steps.deployment.outcome }})"'
+      - name: Show actual deployed site URL
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          set -euo pipefail
+          test -n "$PAGE_URL"
+          printf 'Site: %s\n' "$PAGE_URL"
+          printf 'Deployed site: %s\n' "$PAGE_URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload sanitized diagnostics on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hgt-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.DIAGNOSTICS_DIR }}
+          # Failures before preflight (for example Pages setup) are explained in the job log.
+          if-no-files-found: warn
+          retention-days: 7
